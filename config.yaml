@@ -1,0 +1,183 @@
+# ============================================================
+# Global Configuration — Context-Aware Workspace Organizer
+# ============================================================
+
+app:
+  name: "Context-Aware Workspace Organizer"
+  version: "1.0.0"
+  description: "Intelligent Robotics — Optimizing Object Placement Based on User Workflow"
+  author: "IR Project"
+  python_version: "3.11"
+  debug: true
+
+# --- Paths ---
+paths:
+  data_dir: "data"
+  models_dir: "models"
+  logs_dir: "data/logs"
+  sessions_dir: "data/sessions"
+  db_path: "data/workspace.db"
+  snapshots_dir: "data/snapshots"
+  synthetic_data_dir: "data/synthetic_desk"
+
+# --- Computer Vision ---
+vision:
+  camera_index: 0                   # Webcam index (0 = default)
+  frame_width: 640
+  frame_height: 480
+  fps: 30
+  use_mock_camera: true             # Phase 1: use synthetic/static images
+
+  yolo:
+    model_path: "models/yolo/yolo11n.pt"
+    confidence_threshold: 0.45
+    iou_threshold: 0.50
+    classes:
+      - book
+      - notebook
+      - pen
+      - pencil
+      - cup
+      - laptop
+      - keyboard
+      - mouse
+      - paper
+      - ruler
+    imgsz: 640
+    device: "cpu"                   # 'cpu' or 'cuda'
+
+  bytetrack:
+    track_thresh: 0.45
+    track_buffer: 30
+    match_thresh: 0.80
+    min_box_area: 500
+
+  trocr:
+    model_name: "microsoft/trocr-base-printed"
+    device: "cpu"
+    max_new_tokens: 32
+    confidence_threshold: 0.60
+
+  segformer:
+    model_name: "nvidia/segformer-b0-finetuned-ade-512-512"
+    device: "cpu"
+    num_labels: 150
+    target_classes:                 # ADE20K classes relevant to desk
+      - desk
+      - table
+      - book
+      - floor
+      - wall
+
+# --- Workflow Analysis ---
+workflow:
+  session_timeout_minutes: 30
+  priority_decay_factor: 0.85      # Recency weighting
+  min_interaction_duration_s: 0.5  # Min seconds to count as interaction
+  zone_names:
+    - active_zone                  # Center — most frequently used
+    - secondary_zone               # Mid-range — occasional use
+    - storage_zone                 # Far edges — rarely used
+
+# --- Genetic Algorithm ---
+genetic_algorithm:
+  population_size: 100
+  generations: 150
+  crossover_prob: 0.80
+  mutation_prob: 0.15
+  tournament_size: 5
+  elite_count: 5
+  fitness_weights:
+    priority_alignment: 0.50
+    reach_efficiency: 0.25
+    zone_fit: 0.15
+    no_overlap: 0.10
+
+# --- DQN Agent ---
+dqn:
+  learning_rate: 0.0003
+  gamma: 0.99
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.995
+  replay_buffer_size: 50000
+  batch_size: 64
+  target_update_freq: 10
+  max_episodes: 1000
+  checkpoint_path: "models/dqn/dqn_checkpoint.pth"
+  save_interval: 100
+
+# --- RRT Path Planner ---
+rrt:
+  max_iterations: 5000
+  step_size: 0.05                  # Meters
+  goal_sample_rate: 0.10
+  goal_threshold: 0.02
+  search_space:
+    x_min: 0.0
+    x_max: 1.20                    # 120cm desk width
+    y_min: 0.0
+    y_max: 0.80                    # 80cm desk depth
+    z_min: 0.0
+    z_max: 0.30                    # 30cm max lift
+
+# --- Jacobian IK ---
+jacobian_ik:
+  dof: 6
+  max_iterations: 100
+  tolerance_mm: 1.0
+  damping_lambda: 0.01             # Damped least squares
+  joint_limits:                    # Degrees
+    - [-180, 180]
+    - [-90, 90]
+    - [-150, 150]
+    - [-180, 180]
+    - [-90, 90]
+    - [-180, 180]
+
+# --- Virtual Robot ---
+robot:
+  arm_model: "models/robot/desk_arm.urdf"
+  base_position: [0.60, 0.0, 0.0] # x=center, y=front edge, z=desk surface
+  max_reach_m: 0.70
+  gripper_force_n: 5.0
+  move_speed: 0.15                 # m/s
+
+# --- Virtual Desk ---
+desk:
+  width_m: 1.20
+  depth_m: 0.80
+  surface_z: 0.75                  # Desk height from floor
+  zones:
+    active_zone:
+      x_range: [0.35, 0.85]
+      y_range: [0.20, 0.60]
+    secondary_zone:
+      x_range: [0.15, 1.05]
+      y_range: [0.10, 0.70]
+    storage_zone:
+      x_range: [0.0, 1.20]
+      y_range: [0.0, 0.80]
+
+# --- Database ---
+database:
+  engine: "sqlite"
+  path: "data/workspace.db"
+  echo: false                      # SQLAlchemy echo SQL logs
+
+# --- Simulation ---
+simulation:
+  mode: "2d"                       # '2d' | '3d' | 'both'
+  render_fps: 10
+  show_zones: true
+  show_rrt_paths: true
+  show_tracking_ids: true
+  background_color: [30, 30, 40]
+  window_title: "Workspace Organizer — Simulation"
+
+# --- Dashboard ---
+dashboard:
+  host: "localhost"
+  port: 8501
+  theme: "dark"
+  refresh_interval_s: 2

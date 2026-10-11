@@ -1,0 +1,61 @@
+# ============================================================
+# Context-Aware Workspace Organizer — Requirements
+# Python 3.11 | Windows | Fully Local
+# ============================================================
+
+# --- Core ---
+numpy>=1.26.0
+scipy>=1.12.0
+pyyaml>=6.0.1
+loguru>=0.7.2
+tqdm>=4.66.4
+python-dotenv>=1.0.1
+
+# --- Dashboard / UI ---
+streamlit>=1.35.0
+plotly>=5.22.0
+pandas>=2.2.2
+
+# --- Computer Vision ---
+opencv-python>=4.9.0.80
+Pillow>=10.3.0
+ultralytics>=8.3.0
+
+# --- Deep Learning ---
+torch>=2.2.0
+torchvision>=0.17.0
+torchaudio>=2.2.0
+
+# --- HuggingFace (TrOCR + SegFormer) ---
+transformers>=4.40.0
+datasets>=2.19.0
+huggingface-hub>=0.23.0
+sentencepiece>=0.2.0
+accelerate>=0.30.0
+
+# --- Tracking ---
+supervision>=0.22.0
+
+# --- Planning & Optimization ---
+deap>=1.4.1
+networkx>=3.3.0
+shapely>=2.0.4
+
+# --- RL (DQN) ---
+gymnasium>=0.29.1
+stable-baselines3>=2.3.2
+
+# --- Simulation ---
+pybullet>=3.2.6
+pygame>=2.5.2
+matplotlib>=3.8.4
+
+# --- GUI ---
+# PyQt6>=6.6.0   # Uncomment if GUI module added
+
+# --- Database ---
+sqlalchemy>=2.0.30
+
+# --- Utilities ---
+psutil>=5.9.8
+pynput>=1.7.6

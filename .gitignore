@@ -1,0 +1,49 @@
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# IDE / Editor configuration
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# Logs
+*.log
+logs/
+data/logs/*.log
+!data/logs/.gitkeep
+
+# Databases & Runtime data
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/detections/*
+!data/detections/.gitkeep
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+
+# Temporary scratch files
+scratch_*.py
+write_*.py
