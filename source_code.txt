@@ -1,0 +1,100 @@
+"""Autonomous Context-Aware Workspace Organizer — Core Integration Pipeline (100 Lines)"""
+import numpy as np, torch, cv2, time
+from cv.yolo.book_detector import BookDetector
+from cv.tracking.byte_tracker import ByteTrackTracker
+from cv.trocr.book_text_reader import BookTextReader
+from cv.segformer.workspace_segmenter import WorkspaceSegmenter
+from workflow.workflow_analyzer import WorkflowAnalyzer
+from workflow.context_detector import ContextDetector
+from optimization.placement_optimizer import PlacementOptimizer, BookInfo
+from optimization.genetic_algorithm import GAConfig
+from optimization.fitness_function import FitnessConfig
+from robotics.dqn.dqn_agent import DQNAgent, DQNConfig
+from robotics.dqn.environment import WorkspaceEnv
+from robotics.ik.jacobian_ik import JacobianIK, IKConfig
+from robotics.pipeline import JointSpaceRRT
+from robotics.robot_model import RobotArm, SceneConfig
+
+
+class WorkspaceOrganizerPipeline:
+    """Connects 8 algorithms: YOLO11 -> ByteTrack -> TrOCR -> SegFormer -> Workflow -> GA -> DQN -> IK/RRT."""
+
+    def __init__(self, scene: SceneConfig = None, seed: int = 42):
+        self.scene = scene or SceneConfig.default_scene()
+        self.detector = BookDetector(confidence=0.30)
+        self.detector.load()
+        self.tracker = ByteTrackTracker()
+        self.tracker.initialize()
+        self.reader = BookTextReader()
+        self.reader.load()
+        self.segmenter = WorkspaceSegmenter(); self.segmenter.load()
+        self.workflow = WorkflowAnalyzer(decay_factor=0.90)
+        self.arm = self.scene.arm
+        self.ik = JacobianIK(self.arm, IKConfig(max_iterations=400, tolerance_m=0.005))
+        self.rrt = JointSpaceRRT(self.arm, self.scene, max_iterations=2500, step_size=0.15)
+
+    def run_end_to_end(self, frame: np.ndarray) -> dict:
+        # Phase 1: Computer Vision Perception (YOLO11, ByteTrack, TrOCR, SegFormer)
+        dets = self.detector.detect(frame, filter_books_only=True)
+        crops = [frame[max(0, int(d.y1)):int(d.y2), max(0, int(d.x1)):int(d.x2)] for d in dets]
+        titles = [self.reader.read_title(c).title if c.size > 0 else "Unknown" for c in crops]
+        tracks = self.tracker.update([d.to_xyxy() for d in dets], [d.confidence for d in dets])
+        seg = self.segmenter.segment(frame, detections=dets)
+
+        # Phase 2: Workflow Interaction Analysis & Session Context Detection
+        for i, t in enumerate(tracks):
+            self.workflow.record_event(book_id=t.track_id, book_title=titles[i], interaction="pickup")
+        ctx = ContextDetector(self.workflow).detect_context()
+        wf_mat = self.workflow.get_transition_matrix()
+
+        # Phase 3: Genetic Algorithm Desk Layout Optimization
+        books_info = [BookInfo(b.book_id, b.title, (b.position[0], b.position[1]), b.usage_frequency)
+                      for b in self.scene.books]
+        optimizer = PlacementOptimizer(
+            books=books_info, workflow_matrix=wf_mat, user_position=(0.0, 0.0),
+            workspace=(-0.60, -0.05, 0.60, 0.75), ga_config=GAConfig(generations=30, population_size=40),
+            fitness_config=FitnessConfig(w_retrieval=0.4, w_workflow=0.3, w_obstacle=5.0),
+        )
+        opt_res = optimizer.optimize(verbose=False)
+
+        # Phase 4: Reinforcement Learning (DQN) Action Decision
+        b_pos = np.array([b.position[:2] for b in self.scene.books], dtype=np.float32)
+        t_pos = np.array(opt_res.optimized_arrangement, dtype=np.float32)
+        u_freq = np.array([b.usage_frequency for b in self.scene.books], dtype=np.float32)
+        env = WorkspaceEnv(len(b_pos), b_pos, t_pos, u_freq, wf_mat, user_position=(0.0, 0.0),
+                           workspace=(-0.60, -0.05, 0.60, 0.75), seed=42)
+        obs = env.reset()
+        dqn = DQNAgent(DQNConfig(obs_size=len(obs), n_actions=env.n_actions, force_cpu=True))
+        action_idx = dqn.select_action(obs, evaluate=True)
+        q_vals = dqn.get_q_values(obs)
+
+        # Phase 5: Robotics Kinematics & Path Planning (Jacobian IK & Joint-Space RRT)
+        target_xyz = np.array([t_pos[0][0], t_pos[0][1], 0.15], dtype=np.float64)
+        ik_res = self.ik.solve(target_xyz, q_init=self.arm.angles)
+        q_goal = ik_res.joint_angles_rad if ik_res.converged else self.arm.angles
+        rrt_success, path = self.rrt.plan(q_start=self.arm.angles, q_goal=q_goal)
+
+        return {
+            "detections": len(dets),
+            "titles": titles,
+            "workspace_safe_pct": seg.workspace_pct,
+            "detected_context": ctx.label,
+            "ga_cost_before": opt_res.cost_before,
+            "ga_cost_after": opt_res.cost_after,
+            "dqn_action": env.action_names[action_idx],
+            "dqn_q_max": float(np.max(q_vals)),
+            "ik_converged": ik_res.converged,
+            "ik_error_mm": ik_res.error_mm,
+            "rrt_success": rrt_success,
+            "waypoints": len(path),
+        }
+
+
+if __name__ == "__main__":
+    test_frame = cv2.imread("data/sample_images/ocid_ARID20_top.png")
+    if test_frame is None:
+        test_frame = np.full((720, 1280, 3), 180, dtype=np.uint8)
+    pipeline = WorkspaceOrganizerPipeline()
+    summary = pipeline.run_end_to_end(test_frame)
+    for metric, value in summary.items():
+        print(f"{metric:20s}: {value}")
