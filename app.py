@@ -16,6 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Prevent faulty Anaconda sentencepiece C-extension from causing native Windows SEH crash (0xC0000005)
+if "sentencepiece" not in sys.modules:
+    sys.modules["sentencepiece"] = None
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go

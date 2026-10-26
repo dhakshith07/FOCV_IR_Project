@@ -182,4 +182,5 @@ class OCRRepository:
     # ── Helpers ───────────────────────────────────────────────────────────
     @contextmanager
     def _session(self):
-        yield from self._db.get_session()
+        with self._db.get_session() as s:
+            yield s

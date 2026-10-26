@@ -235,7 +235,7 @@ class BookDetector:
                     x1=x1, y1=y1, x2=x2, y2=y2,
                     confidence=conf,
                     class_id=class_id,
-                    class_name="book" if not self._is_custom else class_name,
+                    class_name="book" if (not self._is_custom and self.filter_books_only) else class_name,
                     source="custom" if self._is_custom else "yolo",
                     frame_index=frame_index,
                     timestamp=ts,

@@ -3,6 +3,7 @@ database/db_manager.py
 SQLite connection, engine creation, and session factory.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 
@@ -46,6 +47,7 @@ class DatabaseManager:
         """Create all tables if they do not exist."""
         Base.metadata.create_all(self._engine)
 
+    @contextmanager
     def get_session(self) -> Generator[Session, None, None]:
         """Context manager that yields a database session."""
         session = self._Session()

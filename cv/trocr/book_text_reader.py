@@ -202,6 +202,10 @@ class BookTextReader:
             return True
 
         try:
+            # Prevent faulty Anaconda sentencepiece C-extension from causing native Windows SEH access violation (0xC0000005)
+            import sys
+            if "sentencepiece" not in sys.modules:
+                sys.modules["sentencepiece"] = None
             from transformers import TrOCRProcessor, VisionEncoderDecoderModel
         except ImportError:
             log.error(
@@ -212,9 +216,15 @@ class BookTextReader:
 
         t0 = time.time()
         try:
-            log.info(f"Loading TrOCR model: {self.model_name}  (first run downloads ~400 MB)")
-            self._processor = TrOCRProcessor.from_pretrained(self.model_name)
-            self._model     = VisionEncoderDecoderModel.from_pretrained(self.model_name)
+            # Try loading from local HuggingFace cache first for fast 1s offline startup
+            try:
+                self._processor = TrOCRProcessor.from_pretrained(self.model_name, local_files_only=True)
+                self._model     = VisionEncoderDecoderModel.from_pretrained(self.model_name, local_files_only=True)
+            except Exception:
+                log.info(f"Downloading TrOCR model: {self.model_name} from HuggingFace Hub (first-time setup)...")
+                self._processor = TrOCRProcessor.from_pretrained(self.model_name, local_files_only=False)
+                self._model     = VisionEncoderDecoderModel.from_pretrained(self.model_name, local_files_only=False)
+
             self._model.eval()
 
             # Move to device (graceful CPU fallback)

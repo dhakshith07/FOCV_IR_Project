@@ -58,10 +58,10 @@ log = get_logger(__name__)
 #  Constants - ADE20K class IDs
 # ===================================================================
 
-WORKSPACE_CLASS_IDS: List[int] = [3, 15, 33, 56, 64]
+WORKSPACE_CLASS_IDS: List[int] = [3, 15, 33, 45, 56, 60, 64]
 
 OBSTACLE_CLASS_IDS: List[int] = [
-    10, 12, 19, 24, 30, 36, 62, 67, 74, 75, 85, 130, 141, 143
+    10, 12, 19, 24, 30, 36, 39, 41, 62, 67, 74, 75, 85, 98, 108, 115, 130, 141, 143
 ]
 
 USER_CLASS_IDS: List[int] = [12]
@@ -322,8 +322,14 @@ class WorkspaceSegmenter:
                 "   [WARNING] Generic ADE20K model - NOT a workspace-specific segmenter.\n"
                 "   Results are approximate. Fine-tune on workspace data for production."
             )
-            self._processor = SegformerImageProcessor.from_pretrained(self.pretrained_model)
-            self._model     = SegformerForSemanticSegmentation.from_pretrained(self.pretrained_model)
+            # Try loading from local HuggingFace cache first for fast 1s offline startup
+            try:
+                self._processor = SegformerImageProcessor.from_pretrained(self.pretrained_model, local_files_only=True)
+                self._model     = SegformerForSemanticSegmentation.from_pretrained(self.pretrained_model, local_files_only=True)
+            except Exception:
+                self._processor = SegformerImageProcessor.from_pretrained(self.pretrained_model, local_files_only=False)
+                self._model     = SegformerForSemanticSegmentation.from_pretrained(self.pretrained_model, local_files_only=False)
+
             self._model.eval()
             self._id2label  = dict(self._model.config.id2label)
             self.mode       = SegmenterMode.PRETRAINED
@@ -342,13 +348,18 @@ class WorkspaceSegmenter:
     # Main inference
     # -------------------------------------------------------------------
 
-    def segment(self, frame: np.ndarray) -> SegmentationResult:
+    def segment(
+        self,
+        frame: np.ndarray,
+        detections: Optional[List[Any]] = None,
+    ) -> SegmentationResult:
         """
         Run SegFormer on frame and return a full SegmentationResult.
 
         Parameters
         ----------
-        frame : BGR numpy array (H x W x 3)
+        frame      : BGR numpy array (H x W x 3)
+        detections : Optional List[Detection] to fuse into the obstacle map.
 
         Returns
         -------
@@ -366,7 +377,7 @@ class WorkspaceSegmenter:
             log.error(f"SegFormer inference failed: {exc}. Returning synthetic fallback.")
             return self._synthetic_result(frame)
 
-        result = self._build_result(frame, raw_mask, time.time() - t0)
+        result = self._build_result(frame, raw_mask, time.time() - t0, detections=detections)
         self._total_frames += 1
         log.debug(
             f"Frame {self._total_frames}: workspace={result.workspace_pct:.1%} "
@@ -406,9 +417,10 @@ class WorkspaceSegmenter:
 
     def _build_result(
         self,
-        frame:    np.ndarray,
-        raw_mask: np.ndarray,
-        elapsed:  float,
+        frame:      np.ndarray,
+        raw_mask:   np.ndarray,
+        elapsed:    float,
+        detections: Optional[List[Any]] = None,
     ) -> SegmentationResult:
         """Build all derived maps from a raw class-ID mask."""
         H, W  = frame.shape[:2]
@@ -417,6 +429,14 @@ class WorkspaceSegmenter:
         workspace_mask = self._build_mask(raw_mask, self.workspace_class_ids)
         obstacle_map   = self._build_mask(raw_mask, self.obstacle_class_ids)
         user_mask      = self._build_mask(raw_mask, USER_CLASS_IDS)
+
+        # Multi-modal fusion: fuse detected objects (YOLO) into the obstacle map
+        if detections:
+            for d in detections:
+                x1, y1 = max(0, int(d.x1)), max(0, int(d.y1))
+                x2, y2 = min(W, int(d.x2)), min(H, int(d.y2))
+                if x2 > x1 and y2 > y1:
+                    obstacle_map[y1:y2, x1:x2] = True
 
         workspace_mask = self._morph_clean(workspace_mask)
         obstacle_map   = self._morph_clean(obstacle_map)

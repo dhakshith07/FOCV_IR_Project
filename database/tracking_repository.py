@@ -186,4 +186,5 @@ class TrackingRepository:
     @contextmanager
     def _session(self):
         """Yield a managed SQLAlchemy session."""
-        yield from self._db.get_session()
+        with self._db.get_session() as s:
+            yield s
