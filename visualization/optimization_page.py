@@ -148,9 +148,10 @@ def render_optimization_page() -> None:
             opt = PlacementOptimizer(
                 books=books_sample,
                 workflow_matrix=wf_mat,
+                user_position=(0.0, 0.0),
                 workspace=(-0.28, 0.22, 0.28, 0.42),
                 ga_config=ga_cfg,
-                fitness_config=fit_cfg
+                fitness_config=fit_cfg,
             )
             res = opt.optimize()
             st.success(f"GA Evolved! Cost improved from {res.cost_before:.3f} to {res.cost_after:.3f} ({res.improvement_pct:.1f}% improvement) in {generations} generations.")

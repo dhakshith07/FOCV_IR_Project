@@ -142,7 +142,8 @@ def render_dqn_page() -> None:
         )
         obs = env.reset()
         agent = DQNAgent(config=DQNConfig(obs_size=len(obs), n_actions=env.n_actions, force_cpu=True))
-        act_id, q_vals = agent.select_action(obs, evaluate=True)
+        act_id = agent.select_action(obs, evaluate=True)
+        q_vals = agent.get_q_values(obs)
         next_obs, r, done, info = env.step(act_id)
         act_name = env.action_names[act_id]
         st.success(f"Agent selected action #{act_id} ({act_name}) with Q={q_vals[act_id]:.3f} yielding Reward = {r:+.2f}")
