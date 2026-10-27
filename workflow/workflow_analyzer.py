@@ -316,14 +316,16 @@ class WorkflowAnalyzer:
         for ev in self._events:
             freq[ev.book_id]      += 1
             total_dur[ev.book_id] += ev.duration_s
-            age = (now - ev.timestamp).total_seconds()
+            ts = ev.timestamp if ev.timestamp.tzinfo is not None else ev.timestamp.replace(tzinfo=timezone.utc)
+            age = (now - ts).total_seconds()
             if ev.book_id not in last_seen or age < last_seen[ev.book_id]:
                 last_seen[ev.book_id] = age
 
         # ── Recent usage (exponential decay by hour) ──────────────────
         recent: Dict[int, float] = defaultdict(float)
         for ev in self._events:
-            age_h = (now - ev.timestamp).total_seconds() / 3600.0
+            ts = ev.timestamp if ev.timestamp.tzinfo is not None else ev.timestamp.replace(tzinfo=timezone.utc)
+            age_h = (now - ts).total_seconds() / 3600.0
             recent[ev.book_id] += self._decay_factor ** age_h
 
         # ── Sequential scores from current book ───────────────────────

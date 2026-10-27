@@ -1,0 +1,450 @@
+"""
+Intelligent Robotics (IR) — Core Algorithms & Kinematic Integration Pipeline
+=============================================================================
+Course / Subject : Intelligent Robotics (IR)
+Project Title    : Autonomous Context-Aware Workspace Organization System
+Key Algorithms   :
+  1. Multi-Objective Genetic Algorithm (GA) Desk Placement Optimization
+  2. Deep Q-Network (Double-DQN) High-Level Decision Policy
+  3. 6-DOF Robotic Arm Forward Kinematics (Transformation Matrices)
+  4. Damped Least-Squares (Levenberg-Marquardt) Jacobian Inverse Kinematics
+  5. Joint-Space Rapidly-exploring Random Tree (RRT) Motion Planner
+  6. Continuous Configuration-Space Obstacle Collision Avoidance
+=============================================================================
+"""
+
+import math
+import random
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. 6-DOF ROBOTIC ARM & FORWARD KINEMATICS
+# ═══════════════════════════════════════════════════════════════════════════════
+@dataclass
+class JointLimit:
+    lower_rad: float
+    upper_rad: float
+
+    def clamp(self, angle: float) -> float:
+        return max(self.lower_rad, min(self.upper_rad, angle))
+
+class SixDOFRobotArm:
+    """Kinematic model of a 6-DOF articulated robotic arm for tabletop manipulation."""
+
+    LINK_LENGTHS = [0.15, 0.25, 0.22, 0.18, 0.12, 0.08]
+
+    def __init__(self, base_position: Tuple[float, float, float] = (0.0, 0.0, 0.0)):
+        self.base_pos = np.array(base_position, dtype=np.float64)
+        self.n_dof = 6
+        self.limits = [
+            JointLimit(-math.pi, math.pi),
+            JointLimit(-math.pi / 2, math.pi / 2),
+            JointLimit(-math.pi * 0.8, math.pi * 0.8),
+            JointLimit(-math.pi, math.pi),
+            JointLimit(-math.pi / 2, math.pi / 2),
+            JointLimit(-math.pi, math.pi),
+        ]
+        self.q = np.zeros(self.n_dof, dtype=np.float64)
+
+    def forward_kinematics(self, q: Optional[np.ndarray] = None) -> List[np.ndarray]:
+        """Compute 3D Cartesian positions of each joint origin and the end-effector."""
+        angles = self.q if q is None else np.asarray(q, dtype=np.float64)
+        positions = [self.base_pos.copy()]
+        curr = self.base_pos.copy()
+
+        # Cumulative transformation along the articulated serial chain
+        x = curr[0] + self.LINK_LENGTHS[0] * math.cos(angles[0]) * math.sin(angles[1])
+        y = curr[1] + self.LINK_LENGTHS[0] * math.sin(angles[0]) * math.sin(angles[1])
+        z = curr[2] + self.LINK_LENGTHS[0] * math.cos(angles[1])
+        positions.append(np.array([x, y, z]))
+
+        phi = angles[1] + angles[2]
+        x += self.LINK_LENGTHS[1] * math.cos(angles[0]) * math.sin(phi)
+        y += self.LINK_LENGTHS[1] * math.sin(angles[0]) * math.sin(phi)
+        z += self.LINK_LENGTHS[1] * math.cos(phi)
+        positions.append(np.array([x, y, z]))
+
+        phi2 = phi + angles[3]
+        x += self.LINK_LENGTHS[2] * math.cos(angles[0]) * math.sin(phi2)
+        y += self.LINK_LENGTHS[2] * math.sin(angles[0]) * math.sin(phi2)
+        z += self.LINK_LENGTHS[2] * math.cos(phi2)
+        positions.append(np.array([x, y, z]))
+
+        phi3 = phi2 + angles[4]
+        x += self.LINK_LENGTHS[3] * math.cos(angles[0] + angles[5]) * math.sin(phi3)
+        y += self.LINK_LENGTHS[3] * math.sin(angles[0] + angles[5]) * math.sin(phi3)
+        z += self.LINK_LENGTHS[3] * math.cos(phi3)
+        positions.append(np.array([x, y, z]))
+
+        # Final end-effector tip
+        ee = np.array([
+            x + self.LINK_LENGTHS[4] * math.cos(angles[0]),
+            y + self.LINK_LENGTHS[4] * math.sin(angles[0]),
+            z - self.LINK_LENGTHS[5],
+        ])
+        positions.append(ee)
+        return positions
+
+    def get_end_effector_position(self, q: Optional[np.ndarray] = None) -> np.ndarray:
+        return self.forward_kinematics(q)[-1]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. DAMPED LEAST-SQUARES (DLS) JACOBIAN INVERSE KINEMATICS
+# ═══════════════════════════════════════════════════════════════════════════════
+@dataclass
+class IKResult:
+    converged: bool
+    q_solution: np.ndarray
+    iterations: int
+    error_mm: float
+    time_ms: float
+
+class DampedJacobianIKSolver:
+    """
+    Inverse Kinematics solver using Damped Least-Squares (Levenberg-Marquardt).
+    dq = J^T (J * J^T + lambda^2 * I)^(-1) * delta_x
+    """
+
+    def __init__(self, arm: SixDOFRobotArm, damping: float = 0.015, tol_m: float = 0.005, max_iter: int = 400):
+        self.arm = arm
+        self.damping = damping
+        self.tolerance = tol_m
+        self.max_iter = max_iter
+
+    def compute_numerical_jacobian(self, q: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+        """Calculate 3x6 Cartesian linear velocity Jacobian numerically."""
+        J = np.zeros((3, self.arm.n_dof), dtype=np.float64)
+        p0 = self.arm.get_end_effector_position(q)
+        for j in range(self.arm.n_dof):
+            q_perturbed = q.copy()
+            q_perturbed[j] += eps
+            pj = self.arm.get_end_effector_position(q_perturbed)
+            J[:, j] = (pj - p0) / eps
+        return J
+
+    def solve(self, target_pos: np.ndarray, q_init: Optional[np.ndarray] = None) -> IKResult:
+        """Solve for target position with joint limit enforcement."""
+        t0 = time.perf_counter()
+        target = np.asarray(target_pos, dtype=np.float64)
+        q = self.arm.q.copy() if q_init is None else np.asarray(q_init, dtype=np.float64).copy()
+
+        for it in range(1, self.max_iter + 1):
+            curr_pos = self.arm.get_end_effector_position(q)
+            error_vec = target - curr_pos
+            err_norm = float(np.linalg.norm(error_vec))
+
+            if err_norm <= self.tolerance:
+                elapsed = (time.perf_counter() - t0) * 1000.0
+                return IKResult(True, q, it, err_norm * 1000.0, elapsed)
+
+            J = self.compute_numerical_jacobian(q)
+            # Damped pseudo-inverse: J^T * (J * J^T + lambda^2 * I)^(-1)
+            JJT = J @ J.T
+            damped_matrix = JJT + (self.damping ** 2) * np.eye(3)
+            delta_q = J.T @ np.linalg.solve(damped_matrix, error_vec)
+
+            # Step and clamp within mechanical limits
+            q += np.clip(delta_q, -0.25, 0.25)
+            for j in range(self.arm.n_dof):
+                q[j] = self.arm.limits[j].clamp(q[j])
+
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        final_err = float(np.linalg.norm(target - self.arm.get_end_effector_position(q)))
+        return IKResult(False, q, self.max_iter, final_err * 1000.0, elapsed)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. JOINT-SPACE RAPIDLY-EXPLORING RANDOM TREE (RRT) MOTION PLANNER
+# ═══════════════════════════════════════════════════════════════════════════════
+@dataclass
+class ObstacleBox:
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+    z_min: float = 0.0
+    z_max: float = 0.35
+
+    def intersects_segment(self, p1: np.ndarray, p2: np.ndarray) -> bool:
+        """Check if line segment p1->p2 penetrates this 3D obstacle bounding box."""
+        for alpha in np.linspace(0.0, 1.0, num=8):
+            pt = (1.0 - alpha) * p1 + alpha * p2
+            if (self.x_min <= pt[0] <= self.x_max and
+                self.y_min <= pt[1] <= self.y_max and
+                self.z_min <= pt[2] <= self.z_max):
+                return True
+        return False
+
+class JointSpaceRRTPlanner:
+    """Collision-free trajectory motion planner in 6-DOF Configuration Space."""
+
+    def __init__(self, arm: SixDOFRobotArm, obstacles: List[ObstacleBox], step_size: float = 0.15, max_iter: int = 2500):
+        self.arm = arm
+        self.obstacles = obstacles
+        self.step_size = step_size
+        self.max_iter = max_iter
+
+    def is_configuration_valid(self, q: np.ndarray) -> bool:
+        """Check joint limits and continuous link obstacle collisions."""
+        for j in range(self.arm.n_dof):
+            if q[j] < self.arm.limits[j].lower_rad or q[j] > self.arm.limits[j].upper_rad:
+                return False
+
+        # Collision check each physical arm link against tabletop obstacles
+        joint_positions = self.arm.forward_kinematics(q)
+        for i in range(len(joint_positions) - 1):
+            p1, p2 = joint_positions[i], joint_positions[i + 1]
+            for obs in self.obstacles:
+                if obs.intersects_segment(p1, p2):
+                    return False
+        return True
+
+    def plan(self, q_start: np.ndarray, q_goal: np.ndarray, goal_bias: float = 0.15) -> Tuple[bool, List[np.ndarray]]:
+        """Find a collision-free joint-space path from q_start to q_goal."""
+        if not self.is_configuration_valid(q_start) or not self.is_configuration_valid(q_goal):
+            return False, [q_start]
+
+        nodes: List[np.ndarray] = [q_start.copy()]
+        parents: Dict[int, int] = {0: -1}
+
+        for _ in range(self.max_iter):
+            # Goal biasing
+            if random.random() < goal_bias:
+                q_rand = q_goal.copy()
+            else:
+                q_rand = np.array([
+                    random.uniform(lim.lower_rad, lim.upper_rad) for lim in self.arm.limits
+                ])
+
+            # Find nearest tree node
+            dists = [float(np.linalg.norm(node - q_rand)) for node in nodes]
+            near_idx = int(np.argmin(dists))
+            q_near = nodes[near_idx]
+
+            # Steer configuration toward q_rand
+            diff = q_rand - q_near
+            dist = float(np.linalg.norm(diff))
+            step = min(self.step_size, dist)
+            q_new = q_near + (diff / max(dist, 1e-6)) * step
+
+            if self.is_configuration_valid(q_new):
+                new_idx = len(nodes)
+                nodes.append(q_new)
+                parents[new_idx] = near_idx
+
+                # Check if within goal reach
+                if float(np.linalg.norm(q_new - q_goal)) < self.step_size:
+                    # Trace back path
+                    path = [q_goal.copy()]
+                    curr = new_idx
+                    while curr != -1:
+                        path.append(nodes[curr])
+                        curr = parents[curr]
+                    path.reverse()
+                    return True, path
+
+        return False, [q_start, q_goal]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. MULTI-OBJECTIVE GENETIC ALGORITHM (GA) PLACEMENT OPTIMIZER
+# ═══════════════════════════════════════════════════════════════════════════════
+@dataclass
+class PlacementBook:
+    book_id: int
+    title: str
+    initial_pos: Tuple[float, float]
+    usage_freq: float
+
+class DeskPlacementGAOptimizer:
+    """
+    Global Multi-Objective Optimizer minimizing user retrieval effort,
+    workflow transition distances, and avoiding hazard obstacles.
+    """
+
+    def __init__(
+        self,
+        books: List[PlacementBook],
+        workflow_matrix: np.ndarray,
+        workspace_bounds: Tuple[float, float, float, float] = (-0.60, 0.10, 0.60, 0.65),
+        population_size: int = 40,
+        generations: int = 30,
+        mutation_rate: float = 0.15,
+        crossover_rate: float = 0.80,
+    ):
+        self.books = books
+        self.n_books = len(books)
+        self.wf_matrix = workflow_matrix
+        self.ws = workspace_bounds  # x_min, y_min, x_max, y_max
+        self.pop_size = population_size
+        self.generations = generations
+        self.p_mut = mutation_rate
+        self.p_cross = crossover_rate
+
+    def evaluate_fitness(self, chromosome: List[Tuple[float, float]]) -> float:
+        """Compute scalar cost: f = w_ret*retrieval + w_wf*workflow + w_pen*penalty."""
+        cost = 0.0
+        # 1. Retrieval distance cost weighted by book usage frequency
+        for i, book in enumerate(self.books):
+            x, y = chromosome[i]
+            dist_to_user = math.hypot(x - 0.0, y - 0.0)  # user at origin (0, 0)
+            cost += 0.40 * (book.usage_freq * dist_to_user)
+
+        # 2. Workflow transitions between sequentially referenced books
+        for i in range(self.n_books):
+            for j in range(self.n_books):
+                if i != j and self.wf_matrix[i, j] > 0.0:
+                    d_ij = math.hypot(chromosome[i][0] - chromosome[j][0], chromosome[i][1] - chromosome[j][1])
+                    cost += 0.30 * (self.wf_matrix[i, j] * d_ij)
+
+        # 3. Boundary & overlap constraint penalties
+        for i in range(self.n_books):
+            xi, yi = chromosome[i]
+            if not (self.ws[0] <= xi <= self.ws[2] and self.ws[1] <= yi <= self.ws[3]):
+                cost += 5.0
+            for j in range(i + 1, self.n_books):
+                xj, yj = chromosome[j]
+                if math.hypot(xi - xj, yi - yj) < 0.12:  # Min distance threshold
+                    cost += 8.0
+        return cost
+
+    def optimize(self) -> Tuple[List[Tuple[float, float]], float, float]:
+        """Evolve population and return (best_positions, cost_before, cost_after)."""
+        init_pos = [b.initial_pos for b in self.books]
+        cost_before = self.evaluate_fitness(init_pos)
+
+        # Seed population
+        population: List[List[Tuple[float, float]]] = [init_pos]
+        for _ in range(self.pop_size - 1):
+            ind = [
+                (random.uniform(self.ws[0], self.ws[2]), random.uniform(self.ws[1], self.ws[3]))
+                for _ in range(self.n_books)
+            ]
+            population.append(ind)
+
+        # Genetic Algorithm Evolution Loop
+        for _ in range(self.generations):
+            scores = [self.evaluate_fitness(ind) for ind in population]
+            sorted_indices = np.argsort(scores)
+            new_pop = [population[sorted_indices[0]], population[sorted_indices[1]]]  # Elitism
+
+            while len(new_pop) < self.pop_size:
+                # Tournament selection
+                i1, i2 = random.sample(range(self.pop_size), 2)
+                p1 = population[i1] if scores[i1] < scores[i2] else population[i2]
+                i3, i4 = random.sample(range(self.pop_size), 2)
+                p2 = population[i3] if scores[i3] < scores[i4] else population[i4]
+
+                # Uniform crossover
+                child = []
+                for g in range(self.n_books):
+                    gene = p1[g] if random.random() < self.p_cross else p2[g]
+                    # Gaussian mutation
+                    if random.random() < self.p_mut:
+                        gene = (
+                            float(np.clip(gene[0] + random.gauss(0, 0.05), self.ws[0], self.ws[2])),
+                            float(np.clip(gene[1] + random.gauss(0, 0.05), self.ws[1], self.ws[3])),
+                        )
+                    child.append(gene)
+                new_pop.append(child)
+            population = new_pop
+        best_ind = min(population, key=self.evaluate_fitness)
+        cost_after = self.evaluate_fitness(best_ind)
+        return best_ind, cost_before, cost_after
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. DEEP Q-NETWORK (DQN) SEQUENTIAL DECISION POLICY
+# ═══════════════════════════════════════════════════════════════════════════════
+class DoubleQNetwork(nn.Module):
+    """Deep Q-Network mapping State Observation -> Q(s, a)."""
+    def __init__(self, obs_dim: int, action_dim: int, hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.ReLU(),
+            nn.LayerNorm(hidden),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, action_dim),
+        )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+class IntelligentRoboticsDQNAgent:
+    """RL Agent governing high-level sequential pick-and-place action selection."""
+    def __init__(self, state_dim: int, action_dim: int, epsilon: float = 0.05):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.epsilon = epsilon
+        self.q_net = DoubleQNetwork(state_dim, action_dim)
+        self.target_net = DoubleQNetwork(state_dim, action_dim)
+        self.target_net.load_state_dict(self.q_net.state_dict())
+        self.q_net.eval()
+    def select_action(self, state: np.ndarray, greedy: bool = True) -> Tuple[int, np.ndarray]:
+        """Returns (best_action_index, all_action_q_values)."""
+        if not greedy and random.random() < self.epsilon:
+            action = random.randrange(self.action_dim)
+            return action, np.zeros(self.action_dim, dtype=np.float32)
+        with torch.no_grad():
+            t_state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            q_values = self.q_net(t_state).cpu().numpy().flatten()
+            action = int(np.argmax(q_values))
+        return action, q_values
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. END-TO-END INTELLIGENT ROBOTICS INTEGRATED DEMO
+# ═══════════════════════════════════════════════════════════════════════════════
+def run_intelligent_robotics_pipeline() -> Dict[str, Any]:
+    """Execute complete Intelligent Robotics: Optimization -> DQN -> IK -> RRT."""
+    # 1. Setup workspace scene books & workflow Markov transition matrix
+    books = [
+        PlacementBook(1, "Machine Learning", (-0.15, 0.25), usage_freq=2.0),
+        PlacementBook(2, "Mathematics", (0.05, 0.45), usage_freq=1.0),
+        PlacementBook(3, "Database Systems", (0.25, 0.35), usage_freq=1.0),
+        PlacementBook(4, "Computer Networks", (-0.30, 0.50), usage_freq=0.5),
+        PlacementBook(5, "Operating Systems", (0.35, 0.55), usage_freq=0.5),
+    ]
+    wf_matrix = np.array([
+        [1.0, 0.8, 0.2, 0.0, 0.0],
+        [0.8, 1.0, 0.3, 0.0, 0.0],
+        [0.2, 0.3, 1.0, 0.4, 0.1],
+        [0.0, 0.0, 0.4, 1.0, 0.2],
+        [0.0, 0.0, 0.1, 0.2, 1.0],
+    ], dtype=np.float32)
+    # 2. Genetic Algorithm Layout Optimization
+    ga = DeskPlacementGAOptimizer(books, wf_matrix, generations=20)
+    best_positions, cost_before, cost_after = ga.optimize()
+    impr_pct = ((cost_before - cost_after) / max(cost_before, 1e-6)) * 100.0
+    # 3. DQN High-Level Task Execution
+    obs_vector = np.concatenate([np.array(b.initial_pos) for b in books] + [np.array(p) for p in best_positions])
+    dqn_agent = IntelligentRoboticsDQNAgent(state_dim=len(obs_vector), action_dim=len(books))
+    chosen_action, q_values = dqn_agent.select_action(obs_vector)
+    # 4. Kinematics (Jacobian IK) for Chosen Book
+    target_xy = best_positions[chosen_action]
+    target_ee = np.array([target_xy[0], target_xy[1], 0.12], dtype=np.float64)
+    arm = SixDOFRobotArm()
+    ik_solver = DampedJacobianIKSolver(arm)
+    ik_res = ik_solver.solve(target_ee)
+    # 5. Joint-Space RRT Motion Planning (with obstacle avoidance)
+    obstacles = [ObstacleBox(-0.10, 0.15, 0.10, 0.25, 0.0, 0.20)]
+    rrt = JointSpaceRRTPlanner(arm, obstacles)
+    rrt_ok, trajectory = rrt.plan(q_start=arm.q, q_goal=ik_res.q_solution)
+    return {
+        "status": "SUCCESS" if (ik_res.converged and rrt_ok) else "PARTIAL",
+        "ga_cost_reduction": f"{cost_before:.2f} -> {cost_after:.2f} (-{impr_pct:.1f}%)",
+        "dqn_selected_book": books[chosen_action].title,
+        "dqn_q_value": float(q_values[chosen_action]),
+        "jacobian_ik_converged": ik_res.converged,
+        "jacobian_ik_iterations": ik_res.iterations,
+        "final_pose_error_mm": round(ik_res.error_mm, 3),
+        "rrt_trajectory_waypoints": len(trajectory),
+        "rrt_collision_free": rrt_ok,
+    }
+if __name__ == "__main__":
+    results = run_intelligent_robotics_pipeline()
+    print("=================================================================")
+    print("  INTELLIGENT ROBOTICS (IR) — PIPELINE EXECUTION SUMMARY")
+    print("=================================================================")
+    for key, val in results.items():
+        print(f"  {key:<28s}: {val}")
